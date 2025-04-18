@@ -36,9 +36,10 @@ dependencies:
   cupertino_icons: ^1.0.8
   flutter_secure_storage: ^9.0.0 # Use the latest version
   crypto: ^3.0.6
-  local_auth: ^2.3.0
   package_info_plus: ^8.0.0
   random_password_generator: ^0.2.1
+  encrypt: ^5.0.3
+  hashlib: ^1.21.2
 
 dev_dependencies:
   flutter_test:
