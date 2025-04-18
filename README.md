@@ -23,9 +23,11 @@ This application provides a secure way to store and manage your login credential
 
 *(Consider adding screenshots of the main screens here)*
 
-* [Screenshot of HomePage]
+* ![Welcome](https://github.com/user-attachments/assets/11576135-57ce-4d71-9354-6b379d0ca173)
+
 * [Screenshot of AddPasswordPage]
-* [Screenshot of GeneratePasswordPage]
+* ![Generator](https://github.com/user-attachments/assets/d24303d0-0da1-45a5-b631-ebb310b5662f)
+
 * [Screenshot of Lock Screen]
 
 ## Tech Stack & Dependencies
