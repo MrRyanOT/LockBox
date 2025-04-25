@@ -6,7 +6,6 @@ import 'dart:math'; // Required for Random.secure()
 import 'package:crypto/crypto.dart' show sha256; // Only import sha256 from crypto
 import 'dart:async'; // Required for Timer
 import 'dart:ui' as ui; // Import dart:ui (still needed for other potential UI elements)
-// --- REMOVED local_auth import ---
 import 'package:package_info_plus/package_info_plus.dart'; // Import package_info_plus
 import 'package:random_password_generator/random_password_generator.dart'; // Import generator package
 // --- Import hashlib ---
@@ -18,16 +17,32 @@ import 'package:flutter/foundation.dart'; // Import for compute (works cross-pla
 import 'dart:isolate';
 // --- Import encryption package ---
 import 'package:encrypt/encrypt.dart' as encrypt;
-
+// --- Import SharedPreferences ---
+import 'package:shared_preferences/shared_preferences.dart';
+// --- NEW: Import file_picker and path_provider (optional but good practice) ---
+import 'package:file_picker/file_picker.dart';
+import 'dart:io'; // Import for File
+import 'package:screen_protector/screen_protector.dart';
+import 'privacy_policy_page.dart'; // Import the new privacy page
+import 'terms_service_page.dart'; // Import the new terms page
+// import 'package:path_provider/path_provider.dart'; // For directory access if needed later
+// ---
 
 // --- Constants for Secure Storage Keys ---
 const String masterPasswordHashKey = 'master_password_key'; // Stores derived key now
 const String masterPasswordSaltKey = 'master_password_salt';
 // --- End Constants ---
 
+// --- SharedPreferences Keys ---
+const String themeModePrefKey = 'theme_mode';
+const String themeSeedColorPrefKey = 'theme_seed_color';
+const String useAmoledDarkPrefKey = 'use_amoled_dark';
+const String firstRunFlagKey = 'app_first_run_completed_flag';
+// ---
+
 // --- PBKDF2 Configuration (Used by hashlib) ---
-const int pbkdf2Iterations = 100000; // Reduced iterations for better responsiveness
-const int pbkdf2KeyLength = 32; // Key length in bytes (e.g., 32 for AES-256)
+const int pbkdf2Iterations = 600000;
+const int pbkdf2KeyLength = 32;
 // ---
 
 // --- Timeout Durations ---
@@ -40,7 +55,7 @@ final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 // ---
 
 // --- List of Authenticated Routes ---
-const List<String> authenticatedRoutes = ['/home', '/add_password', '/generate_password', '/about'];
+const List<String> authenticatedRoutes = ['/home', '/add_password', '/edit_password', '/generate_password', '/about', '/settings'];
 // ---
 
 // --- List of Non-Authenticated Routes ---
@@ -70,57 +85,126 @@ List<int> _deriveKeyInBackground(Map<String, dynamic> params) {
   final String password = params['password'];
   final List<int> saltBytes = params['saltBytes'];
 
-  // Perform PBKDF2 derivation (using hashlib package's pbkdf2)
   final derivedKeyDigest = pbkdf2(
      utf8.encode(password),
      saltBytes,
      pbkdf2Iterations,
      pbkdf2KeyLength
   );
-  // Return the bytes from the HashDigest object
   return derivedKeyDigest.bytes;
 }
 // --- End Top-level function ---
 
+// --- Top-level function for Android Secure Storage options ---
+AndroidOptions _getAndroidOptions() => const AndroidOptions(
+      encryptedSharedPreferences: true,
+    );
+// ---
 
-// --- RE-ADDED: Service to hold encryption key in memory ---
+// --- Service to hold encryption key in memory ---
 class EncryptionKeyService {
   static final EncryptionKeyService instance = EncryptionKeyService._internal();
   EncryptionKeyService._internal();
 
-  encrypt.Key? _currentKey; // Use prefix encrypt.Key
+  encrypt.Key? _currentKey;
 
-  // Sets the key derived from the master password
   void setKey(List<int> keyBytes) {
-    if (keyBytes.length == pbkdf2KeyLength) { // Ensure correct length
-      _currentKey = encrypt.Key(Uint8List.fromList(keyBytes)); // Use prefix encrypt.Key
+    if (keyBytes.length == pbkdf2KeyLength) {
+      _currentKey = encrypt.Key(Uint8List.fromList(keyBytes));
       print("Encryption key set in memory.");
     } else {
       print("Error: Invalid key length provided to EncryptionKeyService.");
-      _currentKey = null; // Ensure key is null if invalid
+      _currentKey = null;
     }
   }
 
-  // Clears the key from memory (on lock/logout)
   void clearKey() {
     _currentKey = null;
     print("Encryption key cleared from memory.");
   }
 
-  // Retrieves the current key
-  encrypt.Key? getKey() { // Use prefix encrypt.Key
+  encrypt.Key? getKey() {
     return _currentKey;
   }
 
-  // Checks if the key is currently set
   bool isKeySet() {
     return _currentKey != null;
   }
 }
 // --- END EncryptionKeyService ---
 
+// --- Theme Service (Adds AMOLED Preference) ---
+class ThemeService with ChangeNotifier {
+  static final ThemeService instance = ThemeService._internal();
+  ThemeService._internal();
 
-// --- MODIFIED: Inactivity Service (Clears encryption key on lock) ---
+  ThemeMode _themeMode = ThemeMode.dark;
+  Color _selectedSeedColor = Colors.blueGrey;
+  bool _useAmoledDark = false;
+  SharedPreferences? _prefs;
+
+  ThemeMode get themeMode => _themeMode;
+  Color get selectedSeedColor => _selectedSeedColor;
+  bool get useAmoledDark => _useAmoledDark;
+
+  Future<void> loadTheme() async {
+    _prefs = await SharedPreferences.getInstance();
+
+    // Load Theme Mode
+    String? savedThemeMode = _prefs?.getString(themeModePrefKey);
+    print("Loaded theme mode preference: $savedThemeMode");
+    if (savedThemeMode == 'light') {
+      _themeMode = ThemeMode.light;
+    } else {
+      _themeMode = ThemeMode.dark;
+    }
+
+    // Load Seed Color
+    int? savedColorValue = _prefs?.getInt(themeSeedColorPrefKey);
+    print("Loaded theme color preference: $savedColorValue");
+    if (savedColorValue != null) {
+        _selectedSeedColor = Color(savedColorValue);
+    } else {
+        _selectedSeedColor = Colors.blueGrey;
+    }
+
+    // Load AMOLED Preference
+    _useAmoledDark = _prefs?.getBool(useAmoledDarkPrefKey) ?? false;
+    print("Loaded AMOLED preference: $_useAmoledDark");
+
+  }
+
+  Future<void> toggleTheme() async {
+    _themeMode = (_themeMode == ThemeMode.dark) ? ThemeMode.light : ThemeMode.dark;
+    print("Theme mode toggled to: $_themeMode");
+    final String themeString = (_themeMode == ThemeMode.light) ? 'light' : 'dark';
+    await _prefs?.setString(themeModePrefKey, themeString);
+    print("Saved theme mode preference: $themeString");
+    notifyListeners();
+  }
+
+  Future<void> changeSeedColor(Color newColor) async {
+     if (_selectedSeedColor == newColor) return;
+     _selectedSeedColor = newColor;
+     print("Theme seed color changed to: $_selectedSeedColor");
+     await _prefs?.setInt(themeSeedColorPrefKey, newColor.value);
+     print("Saved theme color preference: ${newColor.value}");
+     notifyListeners();
+  }
+
+  Future<void> setAmoledDark(bool value) async {
+     if (_useAmoledDark == value) return;
+     _useAmoledDark = value;
+     print("AMOLED dark theme preference set to: $_useAmoledDark");
+     await _prefs?.setBool(useAmoledDarkPrefKey, value);
+     print("Saved AMOLED preference: $value");
+     notifyListeners();
+  }
+}
+// --- END Theme Service ---
+
+
+// --- Inactivity Service (Unchanged from previous) ---
 class InactivityService with WidgetsBindingObserver {
   static final InactivityService instance = InactivityService._internal();
   InactivityService._internal();
@@ -152,7 +236,6 @@ class InactivityService with WidgetsBindingObserver {
   void notifyRouteChanged(Route? route) {
      if (!_isInitialized) return;
      _currentRouteName = route?.settings.name;
-     // Handle initial route case correctly
      if (_currentRouteName == '/' && route is MaterialPageRoute && _navigatorKey?.currentContext != null) {
          try {
              final Widget initialWidget = route.builder(_navigatorKey!.currentContext!);
@@ -187,11 +270,12 @@ class InactivityService with WidgetsBindingObserver {
      final bool shouldTimerBeActive = _currentRouteName != null && authenticatedRoutes.contains(_currentRouteName);
      print("Handling activity status. Current route: $_currentRouteName. Should timer be active? $shouldTimerBeActive");
      if (shouldTimerBeActive) {
-        // Check if key is set before starting timer on authenticated routes
-        if (!EncryptionKeyService.instance.isKeySet()) {
+        if (!EncryptionKeyService.instance.isKeySet() &&
+            _currentRouteName != '/create_master' &&
+            _currentRouteName != '/settings') {
             print("Warning: Entering authenticated route but encryption key is not set. Forcing lock.");
-            _lockApp(forceClearKey: false); // Key should already be clear or wasn't set
-            return; // Prevent timer start
+            _lockApp(forceClearKey: false);
+            return;
         }
         _resetTimer();
      } else {
@@ -205,22 +289,19 @@ class InactivityService with WidgetsBindingObserver {
     print("Global App Lifecycle State Changed: $state");
 
     if (state == AppLifecycleState.paused || state == AppLifecycleState.inactive) {
-      // Lock immediately if on an authenticated route WHEN APP GOES TO BACKGROUND,
-      // UNLESS it's the Add Password page.
       if (_currentRouteName != null && authenticatedRoutes.contains(_currentRouteName)) {
-          if (_currentRouteName != '/add_password') {
+          if (_currentRouteName != '/add_password' && _currentRouteName != '/edit_password' && _currentRouteName != '/settings') {
              print("App paused/inactive on authenticated route ($_currentRouteName). Locking now.");
-             _cancelTimer(); // Cancel inactivity timer before locking
-             _lockApp(); // Lock the app (will also clear key)
+             _cancelTimer();
+             _lockApp();
           } else {
-             print("App paused/inactive on Add Password page. Inactivity timer remains active.");
+             print("App paused/inactive on Add/Edit Password or Settings page. Inactivity timer remains active.");
           }
       } else {
           print("App paused/inactive on non-authenticated route ($_currentRouteName). Not locking.");
       }
     } else if (state == AppLifecycleState.resumed) {
       print("App Resumed - Handling activity status check");
-      // Re-check timer status on resume (existing logic handles this)
       _handleActivityStatus();
     }
   }
@@ -238,27 +319,31 @@ class InactivityService with WidgetsBindingObserver {
     print("Global Inactivity timer cancelled.");
   }
 
-  // Modified to accept optional param to prevent recursive key clearing call
   void _lockApp({bool forceClearKey = true}) {
      if (!_isInitialized) return;
-    // Check if already on the lock screen to prevent multiple pushes
     if (_currentRouteName == '/enter_master') {
         print("Already on lock screen. Preventing duplicate lock.");
         return;
     }
-    _cancelTimer(); // Ensure timer is cancelled before locking
+    _cancelTimer();
 
-    // Clear encryption key on lock
     if (forceClearKey) {
        EncryptionKeyService.instance.clearKey();
     }
 
-    print("Locking app. Navigating to /enter_master.");
-    _navigatorKey?.currentState?.pushNamedAndRemoveUntil(
-      '/enter_master', (route) => false,
-    );
-    // Update current route name after navigation to prevent immediate re-lock issues
-    _currentRouteName = '/enter_master';
+    print("Scheduling lock action. Navigating to /enter_master post-frame.");
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_navigatorKey?.currentState?.mounted == true) {
+         print("Executing scheduled navigation to /enter_master.");
+         _navigatorKey!.currentState!.pushNamedAndRemoveUntil(
+           '/enter_master', (route) => false,
+         );
+         _currentRouteName = '/enter_master';
+      } else {
+         print("Scheduled navigation cancelled: Navigator state not available/mounted.");
+      }
+    });
   }
 }
 // --- END Inactivity Service ---
@@ -422,17 +507,12 @@ class _AuthWrapperState extends State<AuthWrapper> {
   }
 
   Future<bool> _checkMasterPassword() async {
-    // Check for the derived key / hash key
     final storedKey = await _storage.read(
       key: masterPasswordHashKey,
       aOptions: _getAndroidOptions(),
     );
     return storedKey != null;
   }
-
-  AndroidOptions _getAndroidOptions() => const AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
 
   @override
   Widget build(BuildContext context) {
@@ -467,7 +547,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
 }
 
 
-// CreateMasterPasswordPage (Uses compute, adds loading overlay)
+// CreateMasterPasswordPage (Sets key in service, Unchanged)
 class CreateMasterPasswordPage extends StatefulWidget {
   const CreateMasterPasswordPage({super.key});
 
@@ -482,26 +562,24 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
   final _storage = const FlutterSecureStorage();
   bool _isPasswordVisible = false;
   bool _isConfirmPasswordVisible = false;
-  bool _isSaving = false; // Controls loading overlay visibility
+  bool _isSaving = false;
 
-  // Generates salt bytes and returns Base64 encoded string
   String _generateSalt() {
     final random = Random.secure();
-    final saltBytes = List<int>.generate(16, (index) => random.nextInt(256)); // 16 bytes = 128 bits
+    final saltBytes = List<int>.generate(16, (index) => random.nextInt(256));
     return base64Encode(saltBytes);
   }
 
   Future<void> _saveMasterPassword() async {
     if (_formKey.currentState!.validate()) {
       if (!mounted) return;
-      setState(() { _isSaving = true; }); // Show loading overlay
+      setState(() { _isSaving = true; });
 
       final password = _passwordController.text;
       final saltString = _generateSalt();
       final saltBytes = base64Decode(saltString);
 
       try {
-        // Use compute for PBKDF2
         final derivedKeyBytes = await compute(_deriveKeyInBackground, {
           'password': password,
           'saltBytes': saltBytes,
@@ -509,7 +587,6 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
 
         final derivedKeyString = base64Encode(derivedKeyBytes);
 
-        // Store the Base64 derived key and Base64 salt
         await _storage.write(
           key: masterPasswordHashKey,
           value: derivedKeyString,
@@ -521,11 +598,9 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
           aOptions: _getAndroidOptions(),
         );
 
-        // Set the key in the service
         EncryptionKeyService.instance.setKey(derivedKeyBytes);
 
         if (mounted) {
-           // Hide overlay before showing snackbar/navigating
            setState(() { _isSaving = false; });
            ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('Master password created successfully!')),
@@ -535,7 +610,6 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
       } catch (e) {
         print("Error deriving key or saving master password: $e");
          if (mounted) {
-           // Hide overlay on error
            setState(() { _isSaving = false; });
            ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Error setting master password: ${e.toString()}')),
@@ -544,10 +618,6 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
       }
     }
   }
-
-  AndroidOptions _getAndroidOptions() => const AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
 
   @override
   void dispose() {
@@ -560,9 +630,8 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
   Widget build(BuildContext context) {
      return Scaffold(
       appBar: AppBar(title: const Text('Create Master Password')),
-      body: Stack( // Use Stack for overlay
+      body: Stack(
         children: [
-          // Original Content
           Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(24.0),
@@ -655,7 +724,7 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
                     ),
                     const SizedBox(height: 24),
                     ElevatedButton.icon(
-                      icon: const Icon(Icons.save_alt_outlined), // Simplified button
+                      icon: const Icon(Icons.save_alt_outlined),
                       label: const Text('Create Master Password'),
                       style: _getButtonStyle(context),
                       onPressed: _isSaving ? null : _saveMasterPassword,
@@ -665,7 +734,6 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
               ),
             ),
           ),
-          // Loading Overlay
           Visibility(
             visible: _isSaving,
             child: Container(
@@ -701,7 +769,7 @@ class _CreateMasterPasswordPageState extends State<CreateMasterPasswordPage> {
 // --- End CreateMasterPasswordPage ---
 
 
-// --- MODIFIED: EnterMasterPasswordPage (Removes Biometrics) ---
+// --- MODIFIED: EnterMasterPasswordPage (Sets key, removed biometrics) ---
 class EnterMasterPasswordPage extends StatefulWidget {
   const EnterMasterPasswordPage({super.key});
 
@@ -717,101 +785,113 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
   bool _isChecking = false; // Controls loading overlay visibility
   String? _errorMessage;
 
-  // --- REMOVED Biometric State Variables ---
-
   @override
   void initState() {
     super.initState();
-    // Clear encryption key on showing lock screen
     EncryptionKeyService.instance.clearKey();
-    // --- REMOVED _checkBiometrics call ---
   }
-
-  // --- REMOVED _checkBiometrics method ---
-
-  // --- REMOVED _authenticateWithBiometrics method ---
-
+  String _unlockingText = "Verifying password..."; // Initial text
 
   Future<void> _verifyMasterPassword() async {
-    // Remove check for _isAuthenticatingBiometric
     if (_isChecking) return;
 
     if (_formKey.currentState!.validate()) {
-       if (!mounted) return;
+      if (!mounted) return;
       setState(() {
-        _isChecking = true; // Show loading overlay
+        _isChecking = true;
         _errorMessage = null;
       });
 
       final enteredPassword = _passwordController.text;
 
       try {
-        // Retrieve the stored Base64 derived key and salt
-        final storedDerivedKeyString = await _storage.read(key: masterPasswordHashKey, aOptions: _getAndroidOptions());
-        final storedSaltString = await _storage.read(key: masterPasswordSaltKey, aOptions: _getAndroidOptions());
+        final storedDerivedKeyString = await _storage.read(
+          key: masterPasswordHashKey,
+          aOptions: _getAndroidOptions(),
+        );
+        final storedSaltString = await _storage.read(
+          key: masterPasswordSaltKey,
+          aOptions: _getAndroidOptions(),
+        );
 
         if (storedDerivedKeyString == null || storedSaltString == null) {
-           print("Error: Master password derived key or salt not found in storage.");
-           if (mounted) {
-             setState(() {
-                _errorMessage = 'Setup error: Master password data missing. Please recreate.';
-                _isChecking = false; // Hide overlay
-             });
-           }
-           return;
+          print(
+              "Error: Master password derived key or salt not found in storage.");
+          if (mounted) {
+            setState(() {
+              _errorMessage =
+                  'Setup error: Master password data missing. Please recreate.';
+              _isChecking = false;
+            });
+          }
+          return;
         }
 
-        // Decode the stored salt
         final saltBytes = base64Decode(storedSaltString);
 
-        // Derive key from entered password using compute
-         final calculatedDerivedKeyBytes = await compute(_deriveKeyInBackground, {
-            'password': enteredPassword,
-            'saltBytes': saltBytes,
-         });
+        final calculatedDerivedKeyBytes = await compute(_deriveKeyInBackground, {
+          'password': enteredPassword,
+          'saltBytes': saltBytes,
+        });
 
-        // Encode the newly calculated key to Base64 for comparison
-        final calculatedDerivedKeyString = base64Encode(calculatedDerivedKeyBytes);
+        final calculatedDerivedKeyString =
+            base64Encode(calculatedDerivedKeyBytes);
 
-        // Compare the calculated Base64 key with the stored Base64 key
         if (calculatedDerivedKeyString == storedDerivedKeyString) {
-           // Set the key in the service on successful verification
-           EncryptionKeyService.instance.setKey(calculatedDerivedKeyBytes);
-           if (mounted) {
-             // Hide overlay before navigating
-             setState(() { _isChecking = false; });
-             Navigator.pushReplacementNamed(context, '/home');
-             return;
-           }
+          EncryptionKeyService.instance.setKey(calculatedDerivedKeyBytes);
+
+          // Sequence of updates with delays
+          if (mounted) {
+            setState(() {
+              _unlockingText = "Verifying password...";
+            });
+          }
+          await Future.delayed(const Duration(seconds: 1));
+          if (mounted) {
+            setState(() {
+              _unlockingText = "Encrypting data...";
+            });
+          }
+           await Future.delayed(const Duration(seconds: 1));
+          if (mounted) {
+            setState(() {
+              _unlockingText = "Loading your vault...";
+            });
+          }
+          await Future.delayed(const Duration(seconds: 1));
+
+          if (mounted) {
+            setState(() {
+              _isChecking = false; //  Move this to the end of the sequence
+            });
+            Navigator.pushReplacementNamed(context, '/home');
+            return;
+          }
         } else {
           if (mounted) {
             setState(() {
               _errorMessage = 'Incorrect master password. Please try again.';
               _passwordController.clear();
-              _isChecking = false; // Hide overlay
+              _isChecking = false;
             });
           }
         }
       } catch (e) {
-         print("Error verifying master password: $e");
-         if (mounted) {
-           setState(() {
-              _errorMessage = 'An error occurred during verification: ${e.toString()}';
-              _isChecking = false; // Hide overlay
-           });
-         }
+        print("Error verifying master password: $e");
+        if (mounted) {
+          setState(() {
+            _errorMessage =
+                'An error occurred during verification: ${e.toString()}';
+            _isChecking = false;
+          });
+        }
       }
     } else {
-       // If form is invalid, ensure loading indicator is off
-       if (mounted && _isChecking) {
-          setState(() => _isChecking = false);
-       }
+      if (mounted && _isChecking) {
+        setState(() => _isChecking = false);
+      }
     }
   }
-
-  AndroidOptions _getAndroidOptions() => const AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
 
   @override
   void dispose() {
@@ -821,14 +901,13 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
 
   @override
   Widget build(BuildContext context) {
-     return Scaffold(
+    return Scaffold(
       appBar: AppBar(
         title: const Text('Enter Master Password'),
         automaticallyImplyLeading: false,
       ),
-      body: Stack( // Use Stack for overlay
+      body: Stack(
         children: [
-          // Original Content
           Center(
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(24.0),
@@ -837,29 +916,41 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
                 child: Column(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: <Widget>[
-                     Icon(Icons.lock_open_outlined, size: 60, color: Theme.of(context).colorScheme.secondary),
-                     const SizedBox(height: 20),
-                     Text(
+                    Icon(Icons.lock_open_outlined,
+                        size: 60,
+                        color: Theme.of(context).colorScheme.secondary),
+                    const SizedBox(height: 20),
+                    Text(
                       'Enter your Master Password',
-                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w600),
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineSmall
+                          ?.copyWith(fontWeight: FontWeight.w600),
                       textAlign: TextAlign.center,
                     ),
                     const SizedBox(height: 32),
                     TextFormField(
                       controller: _passwordController,
                       obscureText: !_isPasswordVisible,
-                       autofocus: true,
-                       // Only disable if checking password
-                       enabled: !_isChecking,
+                      autofocus: true,
+                      enabled: !_isChecking,
                       decoration: InputDecoration(
                         labelText: 'Master Password',
-                        border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(12))),
+                        border: const OutlineInputBorder(
+                            borderRadius:
+                                BorderRadius.all(Radius.circular(12))),
                         prefixIcon: const Icon(Icons.password),
                         suffixIcon: IconButton(
-                          icon: Icon(_isPasswordVisible ? Icons.visibility_off : Icons.visibility),
-                          // Only disable if checking password
-                          onPressed: _isChecking ? null : () => setState(() => _isPasswordVisible = !_isPasswordVisible),
-                          tooltip: _isPasswordVisible ? 'Hide password' : 'Show password',
+                          icon: Icon(_isPasswordVisible
+                              ? Icons.visibility_off
+                              : Icons.visibility),
+                          onPressed: _isChecking
+                              ? null
+                              : () => setState(() =>
+                                  _isPasswordVisible = !_isPasswordVisible),
+                          tooltip: _isPasswordVisible
+                              ? 'Hide password'
+                              : 'Show password',
                         ),
                       ),
                       validator: (value) {
@@ -868,8 +959,8 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
                         }
                         return null;
                       },
-                      // Only allow submit if not checking
-                      onFieldSubmitted: (_) => _isChecking ? null : _verifyMasterPassword(),
+                      onFieldSubmitted: (_) =>
+                          _isChecking ? null : _verifyMasterPassword(),
                     ),
                     const SizedBox(height: 16),
                     AnimatedOpacity(
@@ -879,37 +970,35 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
                         padding: const EdgeInsets.only(bottom: 16.0),
                         child: Text(
                           _errorMessage ?? '',
-                          style: TextStyle(color: Theme.of(context).colorScheme.error, fontWeight: FontWeight.w500),
+                          style: TextStyle(
+                              color: Theme.of(context).colorScheme.error,
+                              fontWeight: FontWeight.w500),
                           textAlign: TextAlign.center,
                         ),
                       ),
                     ),
-                     // --- MODIFIED: Removed Row and Biometric Button ---
-                     ElevatedButton.icon(
-                      icon: const Icon(Icons.login_outlined), // Simplified button
+                    ElevatedButton.icon(
+                      icon: const Icon(Icons.login_outlined),
                       label: const Text('Unlock'),
                       style: _getButtonStyle(context),
-                      // Disable button while checking
                       onPressed: _isChecking ? null : _verifyMasterPassword,
-                     ),
-                     // --- End Modification ---
+                    ),
                   ],
                 ),
               ),
             ),
           ),
-           // Loading Overlay
           Visibility(
-            visible: _isChecking, // Show overlay when checking password
+            visible: _isChecking,
             child: Container(
               color: Colors.black.withOpacity(0.6),
-              child: const Center(
+              child:  Center(
                  child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                     CircularProgressIndicator(),
-                     SizedBox(height: 16),
-                     Text("Verifying password...", style: TextStyle(color: Colors.white, fontSize: 16)),
+                     const CircularProgressIndicator(),
+                     const SizedBox(height: 16),
+                     Text(_unlockingText, style: const TextStyle(color: Colors.white, fontSize: 16)),
                   ],
                 ),
               ),
@@ -930,13 +1019,11 @@ class _EnterMasterPasswordPageState extends State<EnterMasterPasswordPage> {
         foregroundColor: Theme.of(context).colorScheme.onPrimary,
       );
   }
-
-   // --- REMOVED _buildBiometricLoadingIndicator ---
 }
 // --- End EnterMasterPasswordPage ---
 
 
-// --- MODIFIED: HomePage (Adds Decryption) ---
+// --- MODIFIED: HomePage (Adds Search/Filter, Edit Button in Dialog) ---
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -949,36 +1036,70 @@ enum SortOrder { nameAZ, dateAdded }
 
 class _HomePageState extends State<HomePage> {
   final _storage = const FlutterSecureStorage();
-  List<PasswordEntry> _passwordEntries = [];
+  List<PasswordEntry> _displayEntries = []; // Holds entries with cleared passwords for display
+  Map<String, String> _encryptedDataMap = {}; // Holds original encrypted data
+  List<PasswordEntry> _filteredDisplayEntries = []; // Holds filtered display entries
   bool _isLoading = true;
-  // State for sorting
-  SortOrder _currentSortOrder = SortOrder.nameAZ; // Default sort order
+  SortOrder _currentSortOrder = SortOrder.nameAZ;
 
+  // --- NEW: Search State ---
+  final TextEditingController _searchController = TextEditingController();
+  String _searchQuery = "";
+  // ---
 
   @override
   void initState() {
     super.initState();
     _loadPasswordEntries();
+    // --- NEW: Add listener for search controller ---
+    _searchController.addListener(_onSearchChanged);
+    // ---
   }
 
   @override
   void dispose() {
+    // --- NEW: Dispose search controller ---
+    _searchController.removeListener(_onSearchChanged);
+    _searchController.dispose();
+    // ---
     super.dispose();
   }
 
+  // --- NEW: Handle search query changes ---
+  void _onSearchChanged() {
+    setState(() {
+      _searchQuery = _searchController.text;
+      _filterEntries(); // Re-filter the list when search query changes
+    });
+  }
+  // ---
 
-  AndroidOptions _getAndroidOptions() => const AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
+  // --- NEW: Filter logic ---
+  void _filterEntries() {
+    if (_searchQuery.isEmpty) {
+      // If search is empty, show all display entries (already sorted)
+      _filteredDisplayEntries = List.from(_displayEntries);
+    } else {
+      final query = _searchQuery.toLowerCase();
+      // Filter the display entries based on service or username containing the query
+      _filteredDisplayEntries = _displayEntries.where((entry) {
+        final serviceMatch = entry.service.toLowerCase().contains(query);
+        final usernameMatch = entry.username.toLowerCase().contains(query);
+        return serviceMatch || usernameMatch;
+      }).toList();
+    }
+    // No need to call setState here as it's called by _onSearchChanged or after load/sort
+  }
+  //---
 
-  // Method to sort entries
+  // Method to sort display entries
   void _sortEntries() {
      if (_currentSortOrder == SortOrder.nameAZ) {
-        // Sort A-Z by original service name
-        _passwordEntries.sort((a, b) => a.service.toLowerCase().compareTo(b.service.toLowerCase()));
+        _displayEntries.sort((a, b) => a.service.toLowerCase().compareTo(b.service.toLowerCase()));
      } else { // dateAdded (Newest First)
-        _passwordEntries.sort((a, b) => b.dateAdded.compareTo(a.dateAdded));
+        _displayEntries.sort((a, b) => b.dateAdded.compareTo(a.dateAdded));
      }
+     _filterEntries(); // --- MODIFIED: Re-apply filter after sorting ---
   }
 
 
@@ -986,12 +1107,10 @@ class _HomePageState extends State<HomePage> {
     if (!mounted) return;
     setState(() { _isLoading = true; });
 
-    // Get encryption key
     final key = EncryptionKeyService.instance.getKey();
     if (key == null) {
        print("Error: Encryption key not available for loading entries. Locking app.");
        if (mounted) {
-         // Force lock if key is missing when trying to load data
          InactivityService.instance._lockApp(forceClearKey: false);
        }
        return;
@@ -1004,10 +1123,11 @@ class _HomePageState extends State<HomePage> {
         ..remove(masterPasswordHashKey)
         ..remove(masterPasswordSaltKey);
 
-      final List<PasswordEntry> loadedEntries = [];
+      final List<PasswordEntry> loadedDisplayEntries = [];
+      final Map<String, String> loadedEncryptedData = {};
+
       allEntries.forEach((storageKey, storedValue) {
         try {
-          // Decrypt stored value
           final combinedBytes = base64Decode(storedValue);
           if (combinedBytes.length < 12) {
              throw Exception('Stored data too short to contain IV.');
@@ -1017,17 +1137,28 @@ class _HomePageState extends State<HomePage> {
           final encryptedData = encrypt.Encrypted(ciphertextBytes);
 
           final decryptedJson = encrypter.decrypt(encryptedData, iv: iv);
-
           final Map<String, dynamic> json = jsonDecode(decryptedJson);
-          loadedEntries.add(PasswordEntry.fromJson(json));
+          final fullEntry = PasswordEntry.fromJson(json);
+
+          final displayEntry = PasswordEntry(
+            service: fullEntry.service,
+            username: fullEntry.username,
+            password: "••••••••", // Placeholder
+            dateAdded: fullEntry.dateAdded,
+          );
+          loadedDisplayEntries.add(displayEntry);
+          loadedEncryptedData[fullEntry.service] = storedValue;
 
         } catch (e) {
           print("Error decoding/decrypting entry for key '$storageKey': $e. Skipping entry.");
         }
       });
 
-      _passwordEntries = loadedEntries;
-      _sortEntries(); // Apply sort based on _currentSortOrder
+      _displayEntries = loadedDisplayEntries;
+      _encryptedDataMap = loadedEncryptedData;
+
+      _sortEntries(); // Sort the main display list
+      _filterEntries(); // Initialize the filtered list
 
       if (mounted) {
         setState(() {
@@ -1077,7 +1208,7 @@ class _HomePageState extends State<HomePage> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('Password for "$originalServiceName" deleted.')),
           );
-          _loadPasswordEntries(); // Reload and re-sort
+          _loadPasswordEntries(); // Reload and re-sort/re-filter
         }
       } catch (e) {
         print("Error deleting password entry: $e");
@@ -1090,69 +1221,182 @@ class _HomePageState extends State<HomePage> {
     }
   }
 
-  void _showPasswordDetails(PasswordEntry entry) {
+  // --- MODIFIED: Decrypts on demand, moved showDialog inside try block ---
+  void _showPasswordDetails(PasswordEntry displayEntry) async {
     if (!mounted) return;
-    bool isPasswordVisible = false;
-    showDialog(
-      context: context,
-      barrierDismissible: true,
-      builder: (BuildContext context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            // Show original service name in dialog title
-            return AlertDialog(
-              title: Text(entry.service), // Use original name
-              content: SingleChildScrollView(
-                child: ListBody(
-                  children: <Widget>[
-                    _buildDetailRow('Username:', entry.username, true),
-                    const SizedBox(height: 8),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Expanded(
-                          child: Text(
-                            isPasswordVisible ? entry.password : '••••••••',
-                            style: const TextStyle(fontSize: 16),
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        IconButton(
-                          icon: Icon(isPasswordVisible ? Icons.visibility_off : Icons.visibility),
-                          onPressed: () => setDialogState(() => isPasswordVisible = !isPasswordVisible),
-                          tooltip: isPasswordVisible ? 'Hide password' : 'Show password',
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.copy),
-                          onPressed: () {
-                            // Use ClipboardService
-                            ClipboardService.instance.copyAndClearAfterDelay(entry.password);
-                            if (mounted) {
-                                Navigator.of(context).pop();
-                                ScaffoldMessenger.of(context).showSnackBar(
-                                  const SnackBar(content: Text('Password copied to clipboard! (Will clear soon)')), // Updated message
-                                );
-                            }
-                          },
-                          tooltip: 'Copy password',
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-              ),
-              actions: <Widget>[
-                TextButton(
-                  child: const Text('Close'),
-                  onPressed: () => Navigator.of(context).pop(),
-                ),
-              ],
-            );
-          },
+
+    final key = EncryptionKeyService.instance.getKey();
+    if (key == null) {
+       print("Error: Encryption key not available for showing details. Locking app.");
+       InactivityService.instance._lockApp(forceClearKey: false);
+       return;
+    }
+    final encrypter = encrypt.Encrypter(encrypt.AES(key, mode: encrypt.AESMode.gcm));
+    final String? storedValue = _encryptedDataMap[displayEntry.service];
+
+    if (storedValue == null) {
+        print("Error: Could not find encrypted data for service ${displayEntry.service}");
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Error retrieving entry data.')),
         );
-      },
-    );
+        return;
+    }
+
+    PasswordEntry? fullEntry; // Make it nullable here
+    try {
+      final combinedBytes = base64Decode(storedValue);
+      final iv = encrypt.IV(combinedBytes.sublist(0, 12));
+      final ciphertextBytes = combinedBytes.sublist(12);
+      final encryptedData = encrypt.Encrypted(ciphertextBytes);
+      final decryptedJson = encrypter.decrypt(encryptedData, iv: iv);
+      final Map<String, dynamic> json = jsonDecode(decryptedJson);
+      fullEntry = PasswordEntry.fromJson(json); // Assign here
+
+      // --- MOVED showDialog INSIDE try block after successful decryption ---
+      if (fullEntry == null || !mounted) return; // Check again before showing dialog
+
+      bool isPasswordVisible = false;
+      showDialog(
+        context: context,
+        barrierDismissible: true,
+        builder: (BuildContext context) {
+          // Use a local variable for the dialog to ensure non-null access
+          final PasswordEntry entryToShow = fullEntry!;
+          return StatefulBuilder(
+            builder: (context, setDialogState) {
+              return AlertDialog(
+                title: Text(entryToShow.service),
+                content: SingleChildScrollView(
+                  child: ListBody(
+                    children: <Widget>[
+                      _buildDetailRow('Username:', entryToShow.username, true),
+                      const SizedBox(height: 8),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              isPasswordVisible ? entryToShow.password : '••••••••',
+                              style: const TextStyle(fontSize: 16),
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          IconButton(
+                            icon: Icon(isPasswordVisible ? Icons.visibility_off : Icons.visibility),
+                            onPressed: () => setDialogState(() => isPasswordVisible = !isPasswordVisible),
+                            tooltip: isPasswordVisible ? 'Hide password' : 'Show password',
+                          ),
+                          IconButton(
+                            icon: const Icon(Icons.copy),
+                            onPressed: () {
+                              ClipboardService.instance.copyAndClearAfterDelay(entryToShow.password);
+                              if (mounted) {
+                                  Navigator.of(context).pop();
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('Password copied to clipboard! (Will clear soon)')),
+                                  );
+                              }
+                            },
+                            tooltip: 'Copy password',
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+                // --- MODIFIED: Add Edit Button to Dialog Actions ---
+                actions: <Widget>[
+                  TextButton(
+                    child: const Text('Edit'),
+                    onPressed: () {
+                      Navigator.pop(context); // Close the dialog first
+                      // Pass the original displayEntry which contains the service name needed by _navigateToEditPage
+                      _navigateToEditPage(displayEntry);
+                    },
+                  ),
+                  TextButton(
+                    child: const Text('Close'),
+                    onPressed: () => Navigator.of(context).pop(),
+                  ),
+                ],
+                // --- End Modification ---
+              );
+            },
+          );
+        },
+      );
+      // --- End moving showDialog ---
+
+    } catch (e) {
+       print("Error decrypting entry for details view: $e");
+       if (mounted) { // Check mounted before showing SnackBar
+         ScaffoldMessenger.of(context).showSnackBar(
+           const SnackBar(content: Text('Error decrypting entry.')),
+         );
+       }
+       return;
+    }
   }
+  // --- End Modification ---
+
+
+  // Navigate to Edit Page
+  void _navigateToEditPage(PasswordEntry displayEntry) async {
+     if (!mounted) return;
+
+     // Decrypt the full entry first
+     final key = EncryptionKeyService.instance.getKey();
+     if (key == null) {
+        print("Error: Encryption key not available for editing. Locking app.");
+        InactivityService.instance._lockApp(forceClearKey: false);
+        return;
+     }
+     final encrypter = encrypt.Encrypter(encrypt.AES(key, mode: encrypt.AESMode.gcm));
+     final String? storedValue = _encryptedDataMap[displayEntry.service];
+
+     if (storedValue == null) {
+         print("Error: Could not find encrypted data for service ${displayEntry.service}");
+         ScaffoldMessenger.of(context).showSnackBar(
+           const SnackBar(content: Text('Error retrieving entry data for editing.')),
+         );
+         return;
+     }
+
+     PasswordEntry? fullEntry;
+     try {
+       final combinedBytes = base64Decode(storedValue);
+       final iv = encrypt.IV(combinedBytes.sublist(0, 12));
+       final ciphertextBytes = combinedBytes.sublist(12);
+       final encryptedData = encrypt.Encrypted(ciphertextBytes);
+       final decryptedJson = encrypter.decrypt(encryptedData, iv: iv);
+       final Map<String, dynamic> json = jsonDecode(decryptedJson);
+       fullEntry = PasswordEntry.fromJson(json);
+     } catch (e) {
+        print("Error decrypting entry for edit view: $e");
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Error decrypting entry for editing.')),
+        );
+        return;
+     }
+
+     if (fullEntry == null || !mounted) return;
+
+     // Navigate to the Edit page, passing the original service name and the full entry
+     final result = await Navigator.pushNamed(
+       context,
+       '/edit_password',
+       arguments: {
+         'originalServiceName': fullEntry.service, // Pass original name
+         'entry': fullEntry, // Pass fully decrypted entry
+       },
+     );
+
+     // Refresh list if edit was successful
+     if (result == true && mounted) {
+       _loadPasswordEntries();
+     }
+  }
+
 
   Widget _buildDetailRow(String label, String value, bool allowCopy) {
     return Row(
@@ -1164,7 +1408,6 @@ class _HomePageState extends State<HomePage> {
           IconButton(
             icon: const Icon(Icons.copy, size: 18),
             onPressed: () {
-              // Keep direct copy for username for now
               Clipboard.setData(ClipboardData(text: value));
               if (mounted) {
                 ScaffoldMessenger.of(context).showSnackBar(
@@ -1189,14 +1432,12 @@ class _HomePageState extends State<HomePage> {
 
   Widget _buildFallbackAvatar(PasswordEntry entry) {
     String displayInitial = '?';
-    // Use original service name for the initial letter now
     String serviceName = entry.service.trim();
     if (serviceName.isNotEmpty) {
         displayInitial = serviceName[0].toUpperCase();
     }
 
     return CircleAvatar(
-      // Use original service name hash for color consistency
       backgroundColor: Colors.primaries[entry.service.hashCode % Colors.primaries.length].shade700,
       foregroundColor: Colors.white,
       child: Text(displayInitial),
@@ -1204,16 +1445,12 @@ class _HomePageState extends State<HomePage> {
   }
 
   String _cleanDomainForFavicon(String serviceUrl) {
-      // Use original service name for favicon lookup (keeps www.)
       String domain = serviceUrl.trim();
-       // Try parsing as URI first
       Uri? uri = Uri.tryParse(domain.contains('://') ? domain : 'http://$domain');
       if (uri != null && uri.host.isNotEmpty && uri.host.contains('.')) {
-          // Return the host; Google favicon service handles www. itself
           return uri.host;
       }
-      // Fallback if not a valid URL structure (e.g., "My Router") - won't fetch favicon
-      return ''; // Return empty if it doesn't look like a domain/URL
+      return '';
   }
 
   // Handle Menu Selection
@@ -1225,8 +1462,10 @@ class _HomePageState extends State<HomePage> {
       case 'about':
          Navigator.pushNamed(context, '/about');
         break;
+      case 'settings':
+         Navigator.pushNamed(context, '/settings');
+         break;
       case 'lock':
-         // Clear key on manual lock
          EncryptionKeyService.instance.clearKey();
          navigatorKey.currentState?.pushNamedAndRemoveUntil(
             '/enter_master', (route) => false);
@@ -1238,9 +1477,9 @@ class _HomePageState extends State<HomePage> {
   void _toggleSortOrder() {
      setState(() {
         _currentSortOrder = (_currentSortOrder == SortOrder.nameAZ)
-            ? SortOrder.dateAdded // Cycle to Date Added
-            : SortOrder.nameAZ; // Cycle back to Name A-Z
-        _sortEntries(); // Re-sort the list
+            ? SortOrder.dateAdded
+            : SortOrder.nameAZ;
+        _sortEntries(); // Re-sort the display list and re-filter
      });
      ScaffoldMessenger.of(context).showSnackBar(
        SnackBar(
@@ -1253,14 +1492,114 @@ class _HomePageState extends State<HomePage> {
 
   @override
   Widget build(BuildContext context) {
-    // Determine sort icon based on state
     final IconData sortIcon = _currentSortOrder == SortOrder.nameAZ
-        ? Icons.sort_by_alpha // Icon for Name A-Z sort
-        : Icons.history_toggle_off_rounded; // Icon for Date Added sort (example)
+        ? Icons.sort_by_alpha
+        : Icons.history_toggle_off_rounded;
 
     final String sortTooltip = _currentSortOrder == SortOrder.nameAZ
         ? 'Sorted by Name (A-Z)'
         : 'Sorted by Date Added (Newest First)';
+
+    Widget bodyContent;
+    if (_isLoading) {
+       bodyContent = const Center(child: CircularProgressIndicator());
+    } else if (_displayEntries.isEmpty) {
+       bodyContent = Center(
+         child: Padding(
+           padding: const EdgeInsets.all(16.0),
+           child: Text(
+             'No passwords saved yet.\nTap the + button to add one!',
+             textAlign: TextAlign.center,
+             style: Theme.of(context).textTheme.headlineSmall?.copyWith(
+               color: Theme.of(context).colorScheme.onSurfaceVariant
+             ),
+           ),
+         ),
+       );
+    } else if (_filteredDisplayEntries.isEmpty) {
+       bodyContent = Center(
+         child: Padding(
+           padding: const EdgeInsets.all(16.0),
+           child: Text(
+             'No entries match your search.',
+             textAlign: TextAlign.center,
+             style: Theme.of(context).textTheme.titleMedium?.copyWith(
+               color: Theme.of(context).colorScheme.onSurfaceVariant
+             ),
+           ),
+         ),
+       );
+    } else {
+       bodyContent = ListView.builder(
+         padding: const EdgeInsets.only(bottom: 80, top: 0),
+         itemCount: _filteredDisplayEntries.length,
+         itemBuilder: (context, index) {
+           final entry = _filteredDisplayEntries[index];
+           final String domainForFavicon = _cleanDomainForFavicon(entry.service);
+           final String faviconUrl = domainForFavicon.isNotEmpty
+             ? 'https://www.google.com/s2/favicons?domain=$domainForFavicon&sz=64'
+             : '';
+
+           return Card(
+             margin: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 5.0),
+             elevation: 2,
+             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)),
+             child: ListTile(
+               leading: SizedBox(
+                 width: 40,
+                 height: 40,
+                 child: faviconUrl.isNotEmpty
+                   ? Image.network(
+                       faviconUrl,
+                       fit: BoxFit.contain,
+                       width: 40,
+                       height: 40,
+                       errorBuilder: (context, error, stackTrace) {
+                         print("Error loading favicon for $domainForFavicon: $error");
+                         return _buildFallbackAvatar(entry);
+                       },
+                       loadingBuilder: (context, child, loadingProgress) {
+                         if (loadingProgress == null) return child;
+                         return Center(
+                           child: CircularProgressIndicator(
+                             strokeWidth: 2.0,
+                             value: loadingProgress.expectedTotalBytes != null
+                                 ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
+                                 : null,
+                           ),
+                         );
+                       },
+                     )
+                   : _buildFallbackAvatar(entry),
+               ),
+               title: Text(entry.service, style: const TextStyle(fontWeight: FontWeight.w500)),
+               subtitle: Text(entry.username),
+               trailing: Row(
+                 mainAxisSize: MainAxisSize.min,
+                 children: [
+                   IconButton(
+                     icon: Icon(Icons.edit_outlined, color: Theme.of(context).colorScheme.secondary),
+                     onPressed: () => _navigateToEditPage(entry),
+                     tooltip: 'Edit Entry',
+                   ),
+                   IconButton(
+                     icon: Icon(Icons.delete_outline, color: Theme.of(context).colorScheme.error),
+                     onPressed: () => _deletePasswordEntry(entry.service),
+                     tooltip: 'Delete Entry',
+                   ),
+                   IconButton(
+                     icon: Icon(Icons.visibility_outlined, color: Theme.of(context).colorScheme.secondary),
+                     onPressed: () => _showPasswordDetails(entry),
+                     tooltip: 'View Details',
+                   ),
+                 ],
+               ),
+               onTap: () => _showPasswordDetails(entry),
+             ),
+           );
+         },
+       );
+    }
 
 
     return Scaffold(
@@ -1268,10 +1607,9 @@ class _HomePageState extends State<HomePage> {
           title: const Text('Password Manager'),
           centerTitle: true,
           actions: [
-            // Sort Button
             IconButton(
-              icon: Icon(sortIcon), // Use dynamic icon
-              tooltip: sortTooltip, // Use dynamic tooltip
+              icon: Icon(sortIcon),
+              tooltip: sortTooltip,
               onPressed: _toggleSortOrder,
             ),
             IconButton(
@@ -1279,7 +1617,6 @@ class _HomePageState extends State<HomePage> {
               onPressed: _loadPasswordEntries,
               tooltip: 'Refresh List',
             ),
-            // PopupMenuButton
             PopupMenuButton<String>(
               onSelected: _onMenuItemSelected,
               icon: const Icon(Icons.more_vert),
@@ -1290,6 +1627,15 @@ class _HomePageState extends State<HomePage> {
                   child: ListTile(
                     leading: Icon(Icons.password_rounded),
                     title: Text('Generate Password'),
+                    contentPadding: EdgeInsets.zero,
+                  ),
+                ),
+                const PopupMenuItem<String>(
+                  value: 'settings',
+                  child: ListTile(
+                    leading: Icon(Icons.settings_outlined),
+                    title: Text('Settings'),
+                    contentPadding: EdgeInsets.zero,
                   ),
                 ),
                  const PopupMenuItem<String>(
@@ -1297,6 +1643,7 @@ class _HomePageState extends State<HomePage> {
                   child: ListTile(
                     leading: Icon(Icons.info_outline_rounded),
                     title: Text('About'),
+                    contentPadding: EdgeInsets.zero,
                   ),
                 ),
                 const PopupMenuDivider(),
@@ -1305,95 +1652,44 @@ class _HomePageState extends State<HomePage> {
                   child: ListTile(
                      leading: Icon(Icons.logout),
                      title: Text('Lock App'),
+                     contentPadding: EdgeInsets.zero,
                   ),
                 ),
               ],
             ),
           ],
         ),
-        body: _isLoading
-            ? const Center(child: CircularProgressIndicator())
-            : _passwordEntries.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Text(
-                        'No passwords saved yet.\nTap the + button to add one!',
-                        textAlign: TextAlign.center,
-                        style: Theme.of(context).textTheme.headlineSmall?.copyWith(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant
-                        ),
-                      ),
-                    ),
-                  )
-                : ListView.builder(
-                    padding: const EdgeInsets.only(bottom: 80),
-                    itemCount: _passwordEntries.length,
-                    itemBuilder: (context, index) {
-                      final entry = _passwordEntries[index];
-                      // Use helper to get domain suitable for favicon service
-                      final String domainForFavicon = _cleanDomainForFavicon(entry.service);
-                      final String faviconUrl = domainForFavicon.isNotEmpty
-                        ? 'https://www.google.com/s2/favicons?domain=$domainForFavicon&sz=64'
-                        : '';
-
-                      return Card(
-                        margin: const EdgeInsets.symmetric(horizontal: 12.0, vertical: 5.0),
-                        elevation: 2,
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12.0)),
-                        child: ListTile(
-                          leading: SizedBox(
-                            width: 40,
-                            height: 40,
-                            child: faviconUrl.isNotEmpty
-                              ? Image.network(
-                                  faviconUrl,
-                                  fit: BoxFit.contain,
-                                  width: 40,
-                                  height: 40,
-                                  // Simplified errorBuilder
-                                  errorBuilder: (context, error, stackTrace) {
-                                    print("Error loading favicon for $domainForFavicon: $error");
-                                    return _buildFallbackAvatar(entry);
-                                  },
-                                  loadingBuilder: (context, child, loadingProgress) {
-                                    if (loadingProgress == null) return child;
-                                    return Center(
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2.0,
-                                        value: loadingProgress.expectedTotalBytes != null
-                                            ? loadingProgress.cumulativeBytesLoaded / loadingProgress.expectedTotalBytes!
-                                            : null,
-                                      ),
-                                    );
-                                  },
-                                )
-                              : _buildFallbackAvatar(entry), // Show fallback if no valid domain for favicon
-                          ),
-                          // Display original service name
-                          title: Text(entry.service, style: const TextStyle(fontWeight: FontWeight.w500)),
-                          subtitle: Text(entry.username),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: Icon(Icons.delete_outline, color: Theme.of(context).colorScheme.error),
-                                // Pass original service name for deletion confirmation
-                                onPressed: () => _deletePasswordEntry(entry.service),
-                                tooltip: 'Delete Entry',
-                              ),
-                              IconButton(
-                                icon: Icon(Icons.visibility_outlined, color: Theme.of(context).colorScheme.secondary),
-                                onPressed: () => _showPasswordDetails(entry),
-                                tooltip: 'View Details',
-                              ),
-                            ],
-                          ),
-                          onTap: () => _showPasswordDetails(entry),
-                        ),
-                      );
-                    },
-                  ),
+        body: Column(
+           children: [
+             Padding(
+               padding: const EdgeInsets.fromLTRB(12.0, 8.0, 12.0, 8.0),
+               child: TextField(
+                 controller: _searchController,
+                 decoration: InputDecoration(
+                   labelText: 'Search',
+                   hintText: 'Search by Service or Username...',
+                   prefixIcon: const Icon(Icons.search),
+                   suffixIcon: _searchQuery.isNotEmpty
+                       ? IconButton(
+                           icon: const Icon(Icons.clear),
+                           tooltip: 'Clear Search',
+                           onPressed: () {
+                             _searchController.clear();
+                           },
+                         )
+                       : null,
+                   border: OutlineInputBorder(
+                     borderRadius: BorderRadius.circular(12.0),
+                   ),
+                   contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 16),
+                 ),
+               ),
+             ),
+             Expanded(
+               child: bodyContent,
+             ),
+           ],
+         ),
         floatingActionButton: FloatingActionButton.extended(
           onPressed: _navigateToAddPasswordPage,
           tooltip: 'Add New Password',
@@ -1406,7 +1702,7 @@ class _HomePageState extends State<HomePage> {
 // --- End HomePage ---
 
 
-// --- MODIFIED: AddPasswordPage (Adds encryption on save) ---
+// --- AddPasswordPage (Adds encryption on save) ---
 class AddPasswordPage extends StatefulWidget {
   const AddPasswordPage({super.key});
 
@@ -1423,17 +1719,12 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
   bool _isPasswordVisible = false;
   bool _isSaving = false;
 
-  AndroidOptions _getAndroidOptions() => const AndroidOptions(
-        encryptedSharedPreferences: true,
-      );
-
   Future<void> _savePasswordEntry() async {
     if (!_formKey.currentState!.validate()) {
-       return; // Don't proceed if form is invalid
+       return;
     }
     if (!mounted) return;
 
-    // --- NEW: Get encryption key ---
     final key = EncryptionKeyService.instance.getKey();
     if (key == null) {
        ScaffoldMessenger.of(context).showSnackBar(
@@ -1442,7 +1733,6 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
        return;
     }
     final encrypter = encrypt.Encrypter(encrypt.AES(key, mode: encrypt.AESMode.gcm));
-    // ---
 
     setState(() { _isSaving = true; });
 
@@ -1450,16 +1740,14 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
     final String originalServiceName = _serviceController.text.trim();
     final String storageKey = normalizeDomain(originalServiceName);
 
-    // Create PasswordEntry with timestamp
     final entry = PasswordEntry(
       service: originalServiceName,
       username: _usernameController.text.trim(),
-      password: _passwordController.text, // Store plain password in the model object
+      password: _passwordController.text,
       dateAdded: DateTime.now(),
     );
 
     try {
-      // Check if entry already exists (still useful)
       final existingEntry = await _storage.read(key: storageKey, aOptions: _getAndroidOptions());
       if (existingEntry != null && mounted) {
         proceedSaving = await showDialog<bool>(
@@ -1486,14 +1774,10 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
       }
 
       if (proceedSaving && mounted) {
-        // --- NEW: Encrypt the JSON data ---
         final jsonString = jsonEncode(entry.toJson());
-        final iv = encrypt.IV.fromSecureRandom(12); // Generate random 12-byte IV for GCM
+        final iv = encrypt.IV.fromSecureRandom(12);
         final encrypted = encrypter.encrypt(jsonString, iv: iv);
-
-        // Combine IV + Ciphertext and Base64 encode for storage
         final storedValue = base64Encode(iv.bytes + encrypted.bytes);
-        // --- End Encryption ---
 
         await _storage.write(key: storageKey, value: storedValue, aOptions: _getAndroidOptions());
 
@@ -1505,7 +1789,6 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
           return;
         }
       } else if (!proceedSaving) {
-         // If user cancelled overwrite, reset saving state
          if (mounted) setState(() => _isSaving = false);
       }
 
@@ -1517,7 +1800,6 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
         );
        }
     } finally {
-      // Ensure saving state is reset if mounted and saving was true
       if (mounted && _isSaving) {
          setState(() { _isSaving = false; });
       }
@@ -1622,6 +1904,250 @@ class _AddPasswordPageState extends State<AddPasswordPage> {
   }
 }
 // --- END AddPasswordPage ---
+
+// --- NEW: Edit Password Page ---
+class EditPasswordPage extends StatefulWidget {
+  final String originalServiceName; // Needed to find/delete old entry if service name changes
+  final PasswordEntry entry; // The fully decrypted entry to edit
+
+  const EditPasswordPage({
+    super.key,
+    required this.originalServiceName,
+    required this.entry,
+  });
+
+  @override
+  State<EditPasswordPage> createState() => _EditPasswordPageState();
+}
+
+class _EditPasswordPageState extends State<EditPasswordPage> {
+  final _formKey = GlobalKey<FormState>();
+  late TextEditingController _serviceController;
+  late TextEditingController _usernameController;
+  late TextEditingController _passwordController;
+  final _storage = const FlutterSecureStorage();
+  bool _isPasswordVisible = false;
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // Pre-fill controllers with existing data
+    _serviceController = TextEditingController(text: widget.entry.service);
+    _usernameController = TextEditingController(text: widget.entry.username);
+    _passwordController = TextEditingController(text: widget.entry.password);
+    _isPasswordVisible = false; // Start with password obscured
+  }
+
+  Future<void> _saveChanges() async {
+    if (!_formKey.currentState!.validate()) {
+      return;
+    }
+    if (!mounted) return;
+
+    final key = EncryptionKeyService.instance.getKey();
+    if (key == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Error: Encryption key not available. Please re-login.')),
+      );
+      return;
+    }
+    final encrypter = encrypt.Encrypter(encrypt.AES(key, mode: encrypt.AESMode.gcm));
+
+    setState(() { _isSaving = true; });
+
+    final String newServiceName = _serviceController.text.trim();
+    final String newUsername = _usernameController.text.trim();
+    final String newPassword = _passwordController.text;
+    final String originalStorageKey = normalizeDomain(widget.originalServiceName);
+    final String newStorageKey = normalizeDomain(newServiceName);
+
+    // Create the updated entry object
+    final updatedEntry = PasswordEntry(
+      service: newServiceName,
+      username: newUsername,
+      password: newPassword,
+      dateAdded: widget.entry.dateAdded, // Keep original date or update? Let's keep original for now.
+      // dateAdded: DateTime.now(), // Alternative: Update date on edit
+    );
+
+    try {
+      bool proceedSaving = true;
+
+      // --- Handle Service Name Change ---
+      if (originalStorageKey != newStorageKey) {
+        // Check if an entry *already exists* for the NEW key
+        final existingEntryCheck = await _storage.read(key: newStorageKey, aOptions: _getAndroidOptions());
+        if (existingEntryCheck != null && mounted) {
+          proceedSaving = await showDialog<bool>(
+                context: context,
+                barrierDismissible: false,
+                builder: (BuildContext context) {
+                  return AlertDialog(
+                    title: const Text('Entry Exists'),
+                    content: Text('An entry for "$newServiceName" (or its equivalent "$newStorageKey") already exists. Overwrite?'),
+                    actions: <Widget>[
+                      TextButton(
+                        child: const Text('Cancel'),
+                        onPressed: () => Navigator.of(context).pop(false),
+                      ),
+                      TextButton(
+                        style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
+                        child: const Text('Overwrite'),
+                        onPressed: () => Navigator.of(context).pop(true),
+                      ),
+                    ],
+                  );
+                },
+              ) ?? false;
+        }
+      }
+      // --- End Handle Service Name Change ---
+
+      if (proceedSaving && mounted) {
+        // Encrypt the updated data
+        final jsonString = jsonEncode(updatedEntry.toJson());
+        final iv = encrypt.IV.fromSecureRandom(12);
+        final encrypted = encrypter.encrypt(jsonString, iv: iv);
+        final storedValue = base64Encode(iv.bytes + encrypted.bytes);
+
+        // If service name changed, delete the old entry first
+        if (originalStorageKey != newStorageKey) {
+           print("Service name changed. Deleting old entry: $originalStorageKey");
+           await _storage.delete(key: originalStorageKey, aOptions: _getAndroidOptions());
+        }
+
+        // Write the new/updated entry (using the new key if name changed)
+        await _storage.write(key: newStorageKey, value: storedValue, aOptions: _getAndroidOptions());
+
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Password for "$newServiceName" updated successfully!')),
+          );
+          Navigator.pop(context, true); // Return true to signal success
+          return;
+        }
+      } else if (!proceedSaving) {
+         // If user cancelled overwrite, reset saving state
+         if (mounted) setState(() => _isSaving = false);
+      }
+
+    } catch (e) {
+      print("Error saving updated password entry: $e");
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error updating password: ${e.toString()}')),
+        );
+      }
+    } finally {
+      // Ensure saving state is reset if mounted and saving was true
+      if (mounted && _isSaving) {
+         setState(() { _isSaving = false; });
+      }
+    }
+  }
+
+
+  @override
+  void dispose() {
+    _serviceController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Edit Password'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Form(
+          key: _formKey,
+          child: ListView(
+            children: <Widget>[
+              TextFormField(
+                controller: _serviceController,
+                enabled: !_isSaving,
+                decoration: InputDecoration(
+                  labelText: 'Service Name or URL',
+                  hintText: 'e.g., Google, My Router, https://...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  prefixIcon: const Icon(Icons.label_important_outline),
+                ),
+                keyboardType: TextInputType.text,
+                autocorrect: false,
+                validator: (value) {
+                  if (value == null || value.trim().isEmpty) {
+                     return 'Please enter a name for this entry';
+                  }
+                  return null;
+                },
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _usernameController,
+                enabled: !_isSaving,
+                decoration: InputDecoration(
+                  labelText: 'Username/Email',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  prefixIcon: const Icon(Icons.person_outline),
+                ),
+                 validator: (value) {
+                  if (value == null || value.trim().isEmpty) return 'Please enter a username or email';
+                  return null;
+                 },
+              ),
+              const SizedBox(height: 16),
+              TextFormField(
+                controller: _passwordController,
+                enabled: !_isSaving,
+                obscureText: !_isPasswordVisible,
+                decoration: InputDecoration(
+                  labelText: 'Password',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
+                  prefixIcon: const Icon(Icons.lock_outline),
+                  suffixIcon: IconButton(
+                    icon: Icon(_isPasswordVisible ? Icons.visibility_off : Icons.visibility),
+                    onPressed: _isSaving ? null : () => setState(() => _isPasswordVisible = !_isPasswordVisible),
+                    tooltip: _isPasswordVisible ? 'Hide password' : 'Show password',
+                  ),
+                ),
+                 validator: (value) {
+                  if (value == null || value.isEmpty) return 'Please enter a password';
+                  return null;
+                 },
+              ),
+              const SizedBox(height: 32),
+              ElevatedButton.icon(
+                icon: _isSaving
+                    ? Container(
+                        width: 24, height: 24, padding: const EdgeInsets.all(2.0),
+                        child: CircularProgressIndicator(
+                          color: Theme.of(context).colorScheme.onPrimary, strokeWidth: 3,
+                        ),
+                      )
+                    : const Icon(Icons.save), // Changed icon
+                label: Text(_isSaving ? 'Saving...' : 'Save Changes'), // Changed text
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  textStyle: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  backgroundColor: Theme.of(context).colorScheme.primary,
+                  foregroundColor: Theme.of(context).colorScheme.onPrimary,
+                ),
+                onPressed: _isSaving ? null : _saveChanges,
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+// --- END Edit Password Page ---
 
 
 // --- GeneratePasswordPage (Implementation Added, Unchanged) ---
@@ -1987,7 +2513,9 @@ class _AboutPageState extends State<AboutPage> {
                  _buildListItem(context, Icons.storage_rounded,
                   'Local, Encrypted Storage: All your credential data is stored exclusively on this device\'s local storage using the operating system\'s secure storage mechanisms (Keychain on iOS, Keystore/EncryptedSharedPreferences on Android). Your data is **never** sent to any external servers or cloud services by this app.'
                 ),
-                 // --- REMOVED Biometric Mention ---
+                _buildListItem(context, Icons.enhanced_encryption_outlined, // NEW Icon
+                  'Entry Encryption: Your saved entries (including passwords) are individually encrypted using AES-GCM before being stored, adding an extra layer of security.' // NEW Text
+                ),
                 _buildListItem(context, Icons.timer_outlined,
                   'Automatic Locking: The app automatically locks after ${inactivityTimeout.inMinutes} minutes of inactivity, or when the app is sent to the background (except when adding a new password).'
                 ),
@@ -2000,13 +2528,14 @@ class _AboutPageState extends State<AboutPage> {
                  _buildSection(
                   context,
                   'Key Features',
-                  '• Securely add, view, and delete login credentials.\n'
-                  '• Strong Master Password protection (PBKDF2, salted & iterated).\n' // Updated
-                  // --- REMOVED Biometric Feature ---
-                  '• Automatic lock on inactivity and backgrounding.\n' // Updated
+                  '• Securely add, view, edit, and delete login credentials.\n' // Added Edit
+                  '• Strong Master Password protection (PBKDF2, salted & iterated).\n'
+                  '• Entry data encryption using AES-GCM.\n'
+                  '• Automatic lock on inactivity and backgrounding.\n'
                   '• Automatic clipboard clearing for copied passwords.\n'
-                  '• Password generator for creating strong passwords.\n' // Added generator
-                  '• Sorting options for the password list.' // Added sorting
+                  '• Password generator for creating strong passwords.\n'
+                  '• Sorting options for the password list.\n'
+                  '• Theme selection (Light/Dark Mode, Color).'
                  ),
 
                  // Important Reminders
@@ -2022,11 +2551,11 @@ class _AboutPageState extends State<AboutPage> {
                  _buildSection(
                   context,
                   'How to Use',
-                  '1. Set a strong Master Password on first launch (use the generator for help!).\n' // Updated
+                  '1. Set a strong Master Password on first launch (use the generator for help!).\n'
                   '2. Use the \'+\' button on the home screen to add new login entries.\n'
                   '3. Tap an entry to view details or copy the username/password.\n'
-                  // --- REMOVED Biometric Step ---
-                  '4. Use the menu icon (⋮) on the home screen for other options like generating passwords or locking the app.' // Renumbered
+                  '4. Use the edit icon (pencil) on an entry to modify it.\n' // Added Edit step
+                  '5. Use the menu icon (⋮) on the home screen for other options like generating passwords, changing settings, or locking the app.' // Renumbered
                  ),
 
                  // Licenses Button
@@ -2070,14 +2599,492 @@ class _AboutPageState extends State<AboutPage> {
 }
 // --- END AboutPage ---
 
+// --- MODIFIED: Settings Page (Added Export Option) ---
+class SettingsPage extends StatefulWidget {
+  const SettingsPage({super.key});
 
-// --- Application Entry Point ---
-void main() {
-  WidgetsFlutterBinding.ensureInitialized();
-  runApp(const PasswordManagerApp());
+  @override
+  State<SettingsPage> createState() => _SettingsPageState();
 }
 
-// --- Main Application Widget ---
+class _SettingsPageState extends State<SettingsPage> {
+  final ThemeService _themeService = ThemeService.instance;
+  
+
+  final Map<String, Color> _themeColors = {
+    'Blue Grey (Default)': Colors.blueGrey,
+    'Green': Colors.green,
+    'Purple': Colors.purple,
+    'Neon Cyan': Colors.cyan,
+    'Orange': Colors.orange,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _themeService.addListener(_onThemeChanged);
+  }
+
+  @override
+  void dispose() {
+    _themeService.removeListener(_onThemeChanged);
+    super.dispose();
+  }
+
+  void _onThemeChanged() {
+    setState(() {});
+  }
+
+  // --- MODIFIED: Export Function (Removed Iterations/KeyLength) ---
+  Future<void> _exportData() async {
+    // 1. Show confirmation dialog with warnings
+    final bool? confirm = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Export Encrypted Data'),
+        content: const SingleChildScrollView( // Ensure content scrolls if needed
+          child: ListBody(
+            children: <Widget>[
+              Text('This will export your encrypted password entries and the necessary salt to decrypt them later.'),
+              SizedBox(height: 12),
+              Text(
+                'IMPORTANT:',
+                style: TextStyle(fontWeight: FontWeight.bold),
+              ),
+              SizedBox(height: 4),
+              Text('• The exported file contains ENCRYPTED data.'),
+              Text('• It is ONLY useful if you remember your Master Password.'),
+              Text('• Store the exported file SECURELY.'),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          TextButton(
+            style: TextButton.styleFrom(
+              foregroundColor: Theme.of(context).colorScheme.primary,
+            ),
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Export'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) {
+      return; // User cancelled or widget unmounted
+    }
+
+    // Show loading indicator (optional)
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Preparing export...')),
+    );
+
+    // 2. Gather data
+    try {
+      const storage = FlutterSecureStorage();
+      final String? saltBase64 = await storage.read(key: masterPasswordSaltKey, aOptions: _getAndroidOptions());
+      final Map<String, String> allStoredData = await storage.readAll(aOptions: _getAndroidOptions());
+
+      if (saltBase64 == null) {
+         throw Exception('Master password salt not found!');
+      }
+
+      // Filter out non-entry keys
+      final Map<String, String> encryptedEntries = Map.from(allStoredData)
+        ..remove(masterPasswordHashKey)
+        ..remove(masterPasswordSaltKey)
+        ..remove(themeModePrefKey) // Remove theme prefs etc.
+        ..remove(themeSeedColorPrefKey)
+        ..remove(useAmoledDarkPrefKey)
+        ..remove(firstRunFlagKey);
+
+      // 3. Prepare export structure (WITHOUT PBKDF2 params)
+      final exportData = {
+        'metadata': {
+          'exportDate': DateTime.now().toIso8601String(),
+          // 'pbkdf2Iterations': pbkdf2Iterations, // REMOVED
+          // 'pbkdf2KeyLength': pbkdf2KeyLength, // REMOVED
+          'saltBase64': saltBase64,
+          'appVersion': (await PackageInfo.fromPlatform()).version, // Add app version
+        },
+        'encryptedEntries': encryptedEntries,
+      };
+
+      // 4. Encode to JSON
+      // Use an encoder with indentation for better readability
+      const jsonEncoder = JsonEncoder.withIndent('  ');
+      final jsonString = jsonEncoder.convert(exportData);
+      final jsonDataBytes = utf8.encode(jsonString); // Encode to bytes
+
+      // 5. Use file_picker to save
+      final String timestampString = DateTime.now().millisecondsSinceEpoch.toString();
+      final String encodedTimestamp = base64UrlEncode(utf8.encode(timestampString))
+          .replaceAll('=', ''); // Encode timestamp and remove padding for cleaner look
+      final String fileName = 'vault_data_$encodedTimestamp.lockbox'; // Combine parts
+
+
+      // Let user pick location and save file
+      String? outputFile = await FilePicker.platform.saveFile(
+         dialogTitle: 'Save Encrypted Backup',
+         fileName: fileName,
+         bytes: Uint8List.fromList(jsonDataBytes), // Pass bytes directly
+         type: FileType.custom, // Use custom to allow .json
+         allowedExtensions: ['lockbox'], // Suggest .json extension
+      );
+
+      if (outputFile != null && mounted) {
+         print('Export saved.'); // Don't print path for privacy/security
+         ScaffoldMessenger.of(context).showSnackBar(
+           const SnackBar(content: Text('Export successful! File saved.')),
+         );
+      } else if (mounted) {
+         print('Export cancelled by user.');
+         ScaffoldMessenger.of(context).showSnackBar(
+           const SnackBar(content: Text('Export cancelled.')),
+         );
+      }
+
+    } catch (e) {
+       print("Error during export: $e");
+       if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Export failed: ${e.toString()}')),
+          );
+       }
+    }
+  }
+  // --- End Export Function ---
+  
+
+  // --- Inside _SettingsPageState in SettingsPage ---
+
+    // ---  Import Function ---
+      // ---  Import Function ---
+  Future<void> _importData(BuildContext context) async { // Added BuildContext
+    // 1. File Selection
+    FilePickerResult? result = await FilePicker.platform.pickFiles(
+      type: FileType.any,
+      withData: true, // Ensure bytes are loaded for cross-platform compatibility
+      //allowedExtensions: ['json'],
+    );
+
+    if (result == null || result.files.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Import cancelled.')),
+        );
+      }
+      return;
+    }
+
+    final String? filePath = result.files.single.path; // <-- Problematic part
+    if (filePath == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+              content: Text('Error: Could not get selected file path.')),
+        );
+      }
+      return;
+    }
+
+    // 2. Data Reading and Validation
+    try {
+      final file = File(filePath); // <-- Fails on Web
+      final String jsonString = await file.readAsString();
+      final Map<String, dynamic> importData = jsonDecode(jsonString);
+
+      // Validate data structure
+      if (importData['metadata'] == null ||
+          importData['encryptedEntries'] == null) {
+        throw Exception(
+            'Invalid import file format: Missing metadata or entries.');
+      }
+
+      final String? saltBase64 = importData['metadata']['saltBase64'];
+      if (saltBase64 == null || saltBase64.isEmpty) {
+        throw Exception('Invalid import file format: Missing salt.');
+      }
+
+      final Map<String, dynamic> encryptedEntries =
+          importData['encryptedEntries'];
+
+      // 3. Prompt for Master Password
+      final String? masterPassword = await _showMasterPasswordDialog(context);
+      if (masterPassword == null || masterPassword.isEmpty) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+                content:
+                    Text('Import cancelled: Master Password required.')),
+          );
+        }
+        return;
+      }
+
+      // 4. Decryption and Data Saving
+      final saltBytes = base64Decode(saltBase64);
+       List<int> derivedKeyBytes;
+
+      try {
+        derivedKeyBytes = await compute(_deriveKeyInBackground, {
+          'password': masterPassword,
+          'saltBytes': saltBytes,
+        });
+      } catch (e) {
+        print('Error deriving key in background isolate: $e');
+        if (mounted) {
+           ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Import failed: ${e.toString()}')),
+          );
+        }
+        return; // IMPORTANT:  Return after showing error
+      }
+
+
+      final key = encrypt.Key(Uint8List.fromList(derivedKeyBytes));
+      final encrypter =
+          encrypt.Encrypter(encrypt.AES(key, mode: encrypt.AESMode.gcm));
+      final storage = const FlutterSecureStorage();
+
+      int importedCount = 0;
+      for (final String storageKey in encryptedEntries.keys) {
+        try {
+          final encryptedData = encryptedEntries[storageKey] as String?;
+          if (encryptedData == null || encryptedData.isEmpty) {
+            print(
+                'Skipping import of entry with empty or null encrypted data for key: $storageKey');
+            continue;
+          }
+
+          final combinedBytes = base64Decode(encryptedData);
+          final iv = encrypt.IV(combinedBytes.sublist(0, 12));
+          final ciphertextBytes = combinedBytes.sublist(12);
+          final encrypted = encrypt.Encrypted(ciphertextBytes);
+          final decryptedJson = encrypter.decrypt(encrypted, iv: iv);
+          final Map<String, dynamic> json = jsonDecode(decryptedJson);
+          final PasswordEntry entry = PasswordEntry.fromJson(json);
+
+          await storage.write(
+              key: normalizeDomain(entry.service),
+              value: encryptedData,
+              aOptions: _getAndroidOptions()); // Save the original encrypted data
+          importedCount++;
+        } catch (e) {
+          print('Error importing entry for key $storageKey: $e');
+          if (mounted) {
+             ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Import failed. Invalid data.')),
+            );
+          }
+          // Optionally, handle specific decryption or saving errors
+        }
+      }
+
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Imported $importedCount entries successfully.')),
+        );
+      }
+    } catch (e) {
+      print('Error during import: $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Import failed: ${e.toString()}')),
+        );
+      }
+    }
+  }
+
+
+  // Helper function to show a dialog for the master password
+  Future<String?> _showMasterPasswordDialog(BuildContext context) async {
+    final _passwordController = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      barrierDismissible: false, // Must enter password
+      builder: (BuildContext context) {
+        return AlertDialog(
+          title: const Text('Enter Master Password'),
+          content: TextField(
+            controller: _passwordController,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: 'Master Password'),
+          ),
+          actions: <Widget>[
+            TextButton(
+              child: const Text('Cancel'),
+              onPressed: () => Navigator.of(context).pop(null),
+            ),
+            TextButton(
+              child: const Text('Import'),
+              onPressed: () => Navigator.of(context).pop(_passwordController.text),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bool isCurrentlyDark = _themeService.themeMode == ThemeMode.dark;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Settings'),
+      ),
+      body: ListView(
+        children: <Widget>[
+          // --- Theme Section ---
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16.0, 16.0, 16.0, 8.0),
+            child: Text(
+              'Appearance',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.bold
+                  ),
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('Dark Mode'),
+            secondary: Icon(isCurrentlyDark
+                ? Icons.dark_mode_outlined
+                : Icons.light_mode_outlined),
+            value: isCurrentlyDark,
+            onChanged: (bool value) {
+              _themeService.toggleTheme();
+            },
+          ),
+           SwitchListTile(
+            title: const Text('Use True Black Background (AMOLED)'),
+            subtitle: Text('Saves power on OLED screens', style: TextStyle(color: !isCurrentlyDark ? Colors.grey : null)),
+            secondary: Icon(Icons.contrast_rounded, color: !isCurrentlyDark ? Colors.grey : null),
+            value: _themeService.useAmoledDark,
+            onChanged: isCurrentlyDark ? (bool value) {
+              _themeService.setAmoledDark(value);
+            } : null,
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(72, 8, 16, 8), // Indent color options
+            child: Text(
+              'Theme Color',
+              style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+            ),
+          ),
+          ..._themeColors.entries.map((entry) {
+             final String name = entry.key;
+             final Color color = entry.value;
+             return RadioListTile<Color>(
+                title: Text(name),
+                value: color,
+                groupValue: _themeService.selectedSeedColor,
+                onChanged: (Color? newColor) {
+                  if (newColor != null) {
+                     _themeService.changeSeedColor(newColor);
+                  }
+                },
+                secondary: CircleAvatar(backgroundColor: color, radius: 12),
+                activeColor: Theme.of(context).colorScheme.primary,
+                contentPadding: const EdgeInsets.only(left: 72.0, right: 16.0), // Indent
+             );
+          }).toList(),
+          const Divider(),
+          // --- Data Management Section ---
+          Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              'Data Management',
+              style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    color: Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.bold
+                  ),
+            ),
+          ),
+          ListTile(
+            leading: const Icon(Icons.upload_file_outlined),
+            title: const Text('Export Encrypted Data'),
+            subtitle: const Text('Save an encrypted backup file.'),
+            onTap: _exportData, // Call the export function
+          ),
+          ListTile(
+            leading: const Icon(Icons.download_for_offline_outlined),
+            title: const Text('Import Data'),
+            subtitle: const Text('Restore from an encrypted backup file.'),
+            onTap: () => _importData(context), // Pass context here // Add this line
+          ),
+          // TODO: Add Import Tile later
+          // ListTile(
+          //   leading: Icon(Icons.download_for_offline_outlined),
+          //   title: Text('Import Data'),
+          //   subtitle: Text('Restore from an encrypted backup file.'),
+          //   onTap: () {
+          //     // Implement import logic
+          //     ScaffoldMessenger.of(context).showSnackBar(
+          //       SnackBar(content: Text('Import not implemented yet.')),
+          //     );
+          //   },
+          // ),// --- NEW: Legal Section ---
+    Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Text(
+        'Legal',
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              color: Theme.of(context).colorScheme.primary,
+              fontWeight: FontWeight.bold
+            ),
+      ),
+    ),
+    ListTile(
+      leading: const Icon(Icons.privacy_tip_outlined),
+      title: const Text('Privacy Policy'),
+      onTap: () {
+        Navigator.pushNamed(context, '/privacy_policy'); // Navigate to privacy page
+      },
+    ),
+    ListTile(
+      leading: const Icon(Icons.gavel_outlined),
+      title: const Text('Terms of Service'),
+      onTap: () {
+        Navigator.pushNamed(context, '/terms_service'); // Navigate to terms page
+      },
+    ),
+        ],
+      ),
+    );
+  }
+}
+// --- END Settings Page ---
+
+
+// --- Application Entry Point ---
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await ThemeService.instance.loadTheme();
+
+  final prefs = await SharedPreferences.getInstance();
+  final bool alreadyRun = prefs.getBool(firstRunFlagKey) ?? false;
+  if (!alreadyRun) {
+    print("First run detected after install/data clear. Wiping secure storage.");
+    const storage = FlutterSecureStorage();
+    await storage.deleteAll(aOptions: _getAndroidOptions());
+    EncryptionKeyService.instance.clearKey();
+    await prefs.setBool(firstRunFlagKey, true);
+    print("Secure storage wiped and first run flag set.");
+  }
+
+  runApp(const PasswordManagerApp());
+}
+// --- End main() ---
+
+// --- MODIFIED: Main Application Widget (Adds Edit Route) ---
 class PasswordManagerApp extends StatefulWidget {
   const PasswordManagerApp({super.key});
 
@@ -2086,29 +3093,56 @@ class PasswordManagerApp extends StatefulWidget {
 }
 
 class _PasswordManagerAppState extends State<PasswordManagerApp> {
+  final ThemeService _themeService = ThemeService.instance;
 
   @override
   void initState() {
     super.initState();
     InactivityService.instance.init(navigatorKey);
+    _themeService.addListener(_onThemeChanged);
+    _applyScreenProtection(); // <-- Call the protection method
   }
-
+  Future<void> _applyScreenProtection() async {
+    try {
+      if (Platform.isAndroid) {
+        await ScreenProtector.preventScreenshotOn(); // Uses FLAG_SECURE on Android
+        print("Screen recording/screenshot protection enabled for Android.");
+      } else if (Platform.isIOS) {
+        await ScreenProtector.preventScreenshotOn(); // Attempts iOS protection
+        // Optional: Add protection for when app is in background/switcher on iOS
+        // await ScreenProtector.protectDataLeakageWithBlur(); // Or .protectDataLeakageWithColor(Colors.white);
+        print("Screen recording/screenshot protection enabled for iOS.");
+      }
+    } catch (e) {
+      print("Error applying screen protection: $e");
+    }
+  }
    @override
   void dispose() {
+    _themeService.removeListener(_onThemeChanged);
     super.dispose();
   }
 
+  void _onThemeChanged() {
+    setState(() {});
+  }
 
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'My Secure Passwords', // Example App Name
+      title: 'My Secure Passwords',
       navigatorKey: navigatorKey,
+      themeMode: _themeService.themeMode,
       theme: ThemeData(
-        visualDensity: VisualDensity.adaptivePlatformDensity,
+        brightness: Brightness.light,
+        colorSchemeSeed: _themeService.selectedSeedColor,
         useMaterial3: true,
+      ),
+      darkTheme: ThemeData(
         brightness: Brightness.dark,
-        colorSchemeSeed: Colors.blueGrey,
+        colorSchemeSeed: _themeService.selectedSeedColor,
+        useMaterial3: true,
+         scaffoldBackgroundColor: _themeService.useAmoledDark ? Colors.black : null,
       ),
       home: const AuthWrapper(),
       debugShowCheckedModeBanner: false,
@@ -2120,6 +3154,20 @@ class _PasswordManagerAppState extends State<PasswordManagerApp> {
         '/add_password': (context) => const AddPasswordPage(),
         '/generate_password': (context) => const GeneratePasswordPage(),
         '/about': (context) => const AboutPage(),
+        '/settings': (context) => const SettingsPage(),
+        '/privacy_policy': (context) => const PrivacyPolicyPage(),
+        '/terms_service': (context) => const TermsServicePage(),
+        '/edit_password': (context) {
+           final args = ModalRoute.of(context)!.settings.arguments as Map<String, dynamic>?;
+           if (args == null || args['entry'] == null || args['originalServiceName'] == null) {
+              print("Error: Missing arguments for edit page.");
+              return const Scaffold(body: Center(child: Text("Error loading edit page.")));
+           }
+           return EditPasswordPage(
+              originalServiceName: args['originalServiceName'] as String,
+              entry: args['entry'] as PasswordEntry,
+           );
+        },
       },
       builder: (context, child) {
         return child == null
